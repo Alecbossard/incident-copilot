@@ -107,7 +107,7 @@ incident-copilot/
 This short demo shows how to:
 
 - Open the incidents page
-- Use the search and filters
+- Use the search 
 - Create a new incident with AI suggestion and similar incidents
 - See the newly created incident in the list
 
