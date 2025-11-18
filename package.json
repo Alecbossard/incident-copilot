@@ -1,0 +1,22 @@
+{
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "libs/*"
+  ],
+  "scripts": {
+    "dev:api": "pnpm --filter ./apps/api run dev",
+    "dev:web": "pnpm --filter ./apps/web run dev",
+    "dev": "pnpm -r --parallel --filter ./apps/api --filter ./apps/web run dev",
+    "db:migrate": "pnpm --filter api exec prisma migrate dev",
+    "db:studio": "pnpm --filter api exec prisma studio",
+    "db:generate": "pnpm --filter api exec prisma generate",
+    "db:seed": "pnpm --filter api run db:seed",
+    "build": "pnpm -r run build",
+    "clean": "pnpm -r run clean || true"
+  },
+  "dependencies": {
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.14.2"
+  }
+}

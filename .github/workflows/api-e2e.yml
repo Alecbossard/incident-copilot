@@ -1,0 +1,72 @@
+name: API E2E
+
+on:
+  push:
+    paths:
+      - "apps/api/**"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - "package.json"
+      - "apps/api/prisma/**"
+  pull_request:
+    paths:
+      - "apps/api/**"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - "package.json"
+      - "apps/api/prisma/**"
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: copilot
+          POSTGRES_USER: copilot
+          POSTGRES_PASSWORD: copilot
+        # Le job accède au service via localhost:5432
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd="pg_isready -U copilot -d copilot"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+
+    env:
+      # DB du job (service Postgres ci-dessus)
+      DATABASE_URL: postgresql://copilot:copilot@localhost:5432/copilot
+      # API guard
+      API_KEY: dev-secret-123
+      CORS_ORIGIN: http://localhost:3000
+      # Embeddings: pas d’appel externe en CI
+      EMB_FALLBACK: local
+      NODE_ENV: test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node & pnpm cache
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Enable corepack (pnpm)
+        run: corepack enable
+
+      - name: Install deps (monorepo)
+        run: pnpm install --frozen-lockfile
+
+      - name: Prisma generate (API)
+        run: pnpm --filter ./apps/api exec prisma generate
+
+      - name: Apply migrations (API)
+        run: pnpm --filter ./apps/api exec prisma migrate deploy
+
+      - name: Run API e2e tests
+        run: pnpm --filter ./apps/api run test:e2e

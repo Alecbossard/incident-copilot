@@ -1,0 +1,37 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum IncidentStatus {
+  OPEN
+  ACKNOWLEDGED
+  MITIGATING
+  RESOLVED
+  CLOSED
+}
+
+enum IncidentSeverity {
+  SEV1
+  SEV2
+  SEV3
+  SEV4
+  SEV5
+}
+
+model Incident {
+  id          String           @id @default(cuid())
+  title       String
+  description String?
+  status      IncidentStatus   @default(OPEN)
+  severity    IncidentSeverity @default(SEV3)
+  createdAt   DateTime         @default(now())
+
+  // NEW: Prisma ne sait pas gérer pgvector → on le déclare non supporté
+  embedding   Unsupported("vector")?
+}
+
