@@ -100,6 +100,44 @@ incident-copilot/
 
 ---
 
+## Demo
+
+### 1. Creating a new incident
+
+This short demo shows how to:
+
+- Open the incidents page
+- Use the search and filters
+- Create a new incident with AI suggestion and similar incidents
+- See the newly created incident in the list
+
+![Demo – Create incident](docs/demo-create-incident.gif)
+
+---
+
+### 2. AI assistant on a single incident
+
+This demo shows the per-incident AI features:
+
+- Viewing the AI-generated summary for an incident
+- Asking the “AI assistant for this incident” for root causes and next steps
+- Asking about similar past incidents and mitigations
+
+![Demo – Incident AI assistant](docs/demo-incident-assistant.gif)
+
+---
+
+### 3. Global assistant
+
+This demo shows the global AI assistant:
+
+- Asking a question about existing incidents (for example: “Which SEV1 incidents exist in the system?”)
+- Getting a synthesized answer based on the incident history
+
+![Demo – Global assistant](docs/demo-global-assistant.gif)
+
+---
+
 ## 3. API (apps/api)
 
 Main endpoints (simplified):
