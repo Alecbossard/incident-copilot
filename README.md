@@ -1,38 +1,36 @@
-Incident Co-Pilot
+# Incident Co-Pilot
 
-Incident Co-Pilot is a small incident management app with a bit of AI on top.
+Incident Co-Pilot is a small **incident management** app with a bit of **AI** on top.
 
 You can:
 
-Create and list incidents (with status + severity)
+- Create and list incidents (with status + severity)
+- Search and filter incidents
+- Store vector embeddings in Postgres (pgvector) and run similarity search
+- Ask the AI to **suggest / summarize** incidents
+- Chat with an AI assistant:
+  - per incident (contextual to one incident + similar ones)
+  - or globally (questions about the whole list of incidents)
 
-Search and filter incidents
+---
 
-Store vector embeddings in Postgres (pgvector) and run similarity search
+## 1. Architecture
 
-Ask the AI to suggest / summarize incidents
+Monorepo layout:
 
-Chat with an AI assistant:
-
-per incident (contextual to one incident + similar ones)
-
-or globally (questions about the list of incidents)
-
-1. Architecture
-   1.1 Monorepo layout
-   .
-   ├─ apps/
-   │  ├─ api/        # NestJS API (REST) + Prisma + Postgres (pgvector)
-   │  ├─ web/        # Next.js (App Router) front-end
-   │  └─ ai/         # FastAPI microservice that talks to OpenAI
-   └─ infra/
+```text
+incident-copilot/
+├─ apps/
+│  ├─ api/      # NestJS API (REST) + Prisma + Postgres (pgvector)
+│  ├─ web/      # Next.js (App Router) front-end
+│  └─ ai/       # FastAPI microservice that talks to OpenAI
+└─ infra/
    └─ docker/
-   ├─ docker-compose.yml
-   ├─ api.env
-   ├─ web.env
-   ├─ ai.env
-   └─ *.env.example
-
+      ├─ docker-compose.yml
+      ├─ api.env.example
+      ├─ web.env.example
+      └─ ai.env.example
+```
 1.2 Tech stack
 
 API: NestJS 11, Prisma, Postgres + pgvector
