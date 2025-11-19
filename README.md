@@ -1,352 +1,451 @@
-import pygame
-import pandas as pd
-import numpy as np
-import math
-import random
-from scipy import interpolate
-import sys
+# Incident Co-Pilot
 
-# --- Configuration ---
-FILENAME = "peanut.csv"
-WINDOW_WIDTH = 1000
-WINDOW_HEIGHT = 800
-BG_COLOR = (30, 30, 30)
-CONE_COLOR = (255, 165, 0)  # Orange
-PATH_COLOR = (200, 0, 0)
-SMOOTH_PATH_COLOR = (0, 200, 255)
-CAR_COLOR = (0, 255, 0)
-FPS = 60
+Incident Co-Pilot is a small **incident management** app with a bit of **AI** on top.
 
-# Paramètres RRT*
-MAX_ITER = 3000
-EXPAND_DIS = 2.0
-PATH_RESOLUTION = 0.5
-CONNECT_CIRCLE_DIST = 50.0
-SAFE_RADIUS = 0.8  # Marge de sécurité autour des plots (rayons plot + voiture)
+You can:
 
-class RRTStar:
-    """ Algorithme RRT* pour la planification de trajectoire """
-    class Node:
-        def __init__(self, x, y):
-            self.x = x
-            self.y = y
-            self.path_x = []
-            self.path_y = []
-            self.parent = None
-            self.cost = 0.0
+- Create and list incidents (with status + severity)
+- Search and filter incidents
+- Store vector embeddings in Postgres (pgvector) and run similarity search
+- Ask the AI to **suggest / summarize** incidents
+- Chat with an AI assistant:
+  - per incident (contextual to one incident + similar ones)
+  - or globally (questions about the whole list of incidents)
 
-    def __init__(self, start, goal, obstacle_list, rand_area,
-                 expand_dis=2.0, path_resolution=0.5, goal_sample_rate=10, max_iter=500):
-        self.start = self.Node(start[0], start[1])
-        self.end = self.Node(goal[0], goal[1])
-        self.min_rand = rand_area[0]
-        self.max_rand = rand_area[1]
-        self.expand_dis = expand_dis
-        self.path_resolution = path_resolution
-        self.goal_sample_rate = goal_sample_rate
-        self.max_iter = max_iter
-        self.obstacle_list = obstacle_list
-        self.node_list = []
+---
 
-    def plan(self):
-        self.node_list = [self.start]
-        for i in range(self.max_iter):
-            if i % 500 == 0:
-                print(f"RRT* Iteration: {i}/{self.max_iter}")
-            
-            rnd_node = self.get_random_node()
-            nearest_ind = self.get_nearest_node_index(self.node_list, rnd_node)
-            nearest_node = self.node_list[nearest_ind]
+## 1. Architecture
 
-            new_node = self.steer(nearest_node, rnd_node, self.expand_dis)
+Monorepo layout:
 
-            if self.check_collision(new_node, self.obstacle_list):
-                near_inds = self.find_near_nodes(new_node)
-                new_node = self.choose_parent(new_node, near_inds)
-                if new_node:
-                    self.node_list.append(new_node)
-                    self.rewire(new_node, near_inds)
+```text
+incident-copilot/
+├─ apps/
+│  ├─ api/      # NestJS API (REST) + Prisma + Postgres (pgvector)
+│  ├─ web/      # Next.js (App Router) front-end
+│  └─ ai/       # FastAPI microservice that talks to OpenAI
+└─ infra/
+   └─ docker/
+      ├─ docker-compose.yml
+      ├─ api.env.example
+      ├─ web.env.example
+      └─ ai.env.example
+```
 
-        # Fin des itérations, recherche du meilleur chemin vers le but
-        last_index = self.search_best_goal_node()
-        if last_index is not None:
-            return self.generate_course(last_index)
-        return None
+### 1.1 Tech stack
 
-    def choose_parent(self, new_node, near_inds):
-        if not near_inds:
-            return None
-        costs = []
-        for i in near_inds:
-            near_node = self.node_list[i]
-            t_node = self.steer(near_node, new_node)
-            if t_node and self.check_collision(t_node, self.obstacle_list):
-                costs.append(near_node.cost + self.calc_dist(near_node, new_node))
-            else:
-                costs.append(float("inf"))
-        min_cost = min(costs)
-        if min_cost == float("inf"): return None
-        min_ind = near_inds[costs.index(min_cost)]
-        new_node = self.steer(self.node_list[min_ind], new_node)
-        new_node.parent = self.node_list[min_ind]
-        new_node.cost = min_cost
-        return new_node
+- **API**: NestJS 11, Prisma, Postgres + pgvector  
+- **Front-end**: Next.js (App Router), React, inline styles (no Tailwind)  
+- **AI service**: FastAPI (Python), official OpenAI client  
+- **Infra**: Docker Compose (Postgres, Redis, MinIO, y-websocket, AI, API, Web)
 
-    def search_best_goal_node(self):
-        dist_to_goal_list = [self.calc_dist_to_goal(n.x, n.y) for n in self.node_list]
-        # On cherche les nœuds proches de la fin
-        goal_inds = [i for i, d in enumerate(dist_to_goal_list) if d <= self.expand_dis * 2]
-        
-        safe_goal_inds = []
-        for i in goal_inds:
-            t_node = self.steer(self.node_list[i], self.end)
-            if self.check_collision(t_node, self.obstacle_list):
-                safe_goal_inds.append(i)
+---
 
-        if not safe_goal_inds: return None
-        min_cost = min([self.node_list[i].cost for i in safe_goal_inds])
-        for i in safe_goal_inds:
-            if self.node_list[i].cost == min_cost: return i
-        return None
+## 2. Features
 
-    def steer(self, from_node, to_node, extend_length=float("inf")):
-        new_node = self.Node(from_node.x, from_node.y)
-        d, theta = self.calc_distance_and_angle(from_node, to_node)
-        new_node.path_x = [new_node.x]
-        new_node.path_y = [new_node.y]
-        if extend_length > d: extend_length = d
-        n_expand = math.floor(extend_length / self.path_resolution)
-        for _ in range(n_expand):
-            new_node.x += self.path_resolution * math.cos(theta)
-            new_node.y += self.path_resolution * math.sin(theta)
-            new_node.path_x.append(new_node.x)
-            new_node.path_y.append(new_node.y)
-        d, _ = self.calc_distance_and_angle(new_node, to_node)
-        if d <= self.path_resolution:
-            new_node.path_x.append(to_node.x)
-            new_node.path_y.append(to_node.y)
-            new_node.x = to_node.x
-            new_node.y = to_node.y
-        new_node.parent = from_node
-        return new_node
+### 2.1 Incidents
 
-    def generate_course(self, goal_ind):
-        path = [[self.end.x, self.end.y]]
-        node = self.node_list[goal_ind]
-        while node.parent is not None:
-            path.append([node.x, node.y])
-            node = node.parent
-        path.append([node.x, node.y])
-        return path
+- Create incidents with:
+  - `title` (required)
+  - `description`
+  - `severity`: `SEV1`…`SEV5`
+  - `status`: `OPEN`, `ACKNOWLEDGED`, `MITIGATING`, `RESOLVED`, `CLOSED`
+- Server-side pagination + filters:
+  - filter by status / severity
+  - text search on title/description
+  - sort by created date, title, status, severity
 
-    def calc_dist_to_goal(self, x, y):
-        return math.hypot(x - self.end.x, y - self.end.y)
+### 2.2 Vector search (pgvector)
 
-    def get_random_node(self):
-        if random.randint(0, 100) > self.goal_sample_rate:
-            rnd = self.Node(random.uniform(self.min_rand, self.max_rand),
-                            random.uniform(self.min_rand, self.max_rand))
-        else:
-            rnd = self.Node(self.end.x, self.end.y)
-        return rnd
+- Local **bag-of-words** embedding (768-dim) computed in the API
+- Embeddings stored in Postgres vector column (`pgvector`)
+- Similarity search endpoint:
+  - `GET /incidents/similar?q=...&k=5`
+- Rebuild embeddings for all incidents:
+  - `POST /incidents/embeddings/rebuild`
 
-    def get_nearest_node_index(self, node_list, rnd_node):
-        dlist = [(node.x - rnd_node.x)**2 + (node.y - rnd_node.y)**2 for node in node_list]
-        return dlist.index(min(dlist))
+### 2.3 AI suggestion & summary
 
-    def check_collision(self, node, obstacle_list):
-        if node is None: return False
-        for (ox, oy, size) in obstacle_list:
-            dx_list = [ox - x for x in node.path_x]
-            dy_list = [oy - y for y in node.path_y]
-            d_list = [dx * dx + dy * dy for (dx, dy) in zip(dx_list, dy_list)]
-            if min(d_list) <= size**2:
-                return False 
-        return True
+- Endpoint `POST /incidents/suggest`
+  - Simple heuristic (regex + tags + severity guess)
+  - Calls the Python `ai` service to refine the suggestion (OpenAI)
+  - Returns:
+    - `summary`
+    - `suggestedTitle`
+    - `impactSummary`
+    - `actionItems[]`
+    - `severityProposed`, `statusProposed`
+    - `tags[]`, `confidence`
+- Endpoint `GET /incidents/:id/summary`
+  - Reuses the same suggestion logic to generate an AI summary for one incident
 
-    def find_near_nodes(self, new_node):
-        nnode = len(self.node_list) + 1
-        r = 50.0 * math.sqrt((math.log(nnode) / nnode))
-        r = min(r, self.expand_dis * 5.0)
-        dist_list = [(node.x - new_node.x)**2 + (node.y - new_node.y)**2 for node in self.node_list]
-        near_inds = [i for i, d in enumerate(dist_list) if d <= r**2]
-        return near_inds
+### 2.4 AI chat
 
-    def rewire(self, new_node, near_inds):
-        for i in near_inds:
-            near_node = self.node_list[i]
-            edge_node = self.steer(new_node, near_node)
-            if not edge_node: continue
-            edge_node.cost = new_node.cost + self.calc_dist(new_node, near_node)
-            if near_node.cost > edge_node.cost:
-                if self.check_collision(edge_node, self.obstacle_list):
-                    near_node.parent = new_node
-                    near_node.cost = edge_node.cost
-                    near_node.path_x = edge_node.path_x
-                    near_node.path_y = edge_node.path_y
+- **Per-incident chat**:
 
-    def calc_dist(self, n1, n2):
-        return math.hypot(n1.x - n2.x, n1.y - n2.y)
-    
-    def calc_distance_and_angle(self, from_node, to_node):
-        dx = to_node.x - from_node.x
-        dy = to_node.y - from_node.y
-        return math.hypot(dx, dy), math.atan2(dy, dx)
+  - `POST /incidents/:id/chat`
+  - API sends `{ incident, similar_incidents, messages }` to the `ai` microservice
+  - Microservice calls OpenAI and returns a reply
+  - Front-end shows a mini chat UI (“You” vs “AI” bubbles)
 
-# --- Gestion de l'affichage et Données ---
+- **Global assistant**:
 
-def load_track(filename):
-    df = pd.read_csv(filename)
-    obstacles = []
-    # On ne considère pas 'car_start' comme un obstacle pour ne pas bloquer le départ
-    for _, row in df.iterrows():
-        if row['tag'] != 'car_start':
-            obstacles.append((row['x'], row['y'], SAFE_RADIUS))
-    
-    # Déterminer les bornes pour l'échelle
-    min_x, max_x = df['x'].min() - 2, df['x'].max() + 2
-    min_y, max_y = df['y'].min() - 2, df['y'].max() + 2
-    
-    # Trouver un but : Le point le plus éloigné du départ
-    df['dist'] = np.sqrt(df['x']**2 + df['y']**2)
-    furthest = df.iloc[df['dist'].idxmax()]
-    
-    # Petit hack : on décale légèrement le but vers l'intérieur (centroid approx)
-    # pour éviter d'être PILE sur le plot
-    goal = (furthest['x'] * 0.9, furthest['y'] * 0.9)
-    
-    return obstacles, (min_x, max_x, min_y, max_y), goal
+  - `/assistant` page on the front-end
+  - API collects the latest incidents and calls `ai`:
+    - `POST /assistant/query`
+  - Assistant can answer:
+    - questions about incidents (`Which SEV1 incidents happened this week?`)
+    - general questions (acts like a normal chatbot)
 
-def to_screen(x, y, bounds, scale, offset):
-    # Conversion Monde -> Écran PyGame
-    # Y doit être inversé car PyGame (0,0) est en haut à gauche
-    sx = (x - bounds[0]) * scale + offset[0]
-    sy = WINDOW_HEIGHT - ((y - bounds[2]) * scale + offset[1])
-    return int(sx), int(sy)
+---
 
-def smooth_path(path):
-    """ Lissage B-Spline """
-    x = [p[0] for p in path][::-1] # Inverser pour Start -> Goal
-    y = [p[1] for p in path][::-1]
-    
-    if len(x) < 3: return list(zip(x, y))
-    
-    try:
-        tck, u = interpolate.splprep([x, y], s=1.0, k=3)
-        u_new = np.linspace(0, 1, num=300) # Plus de points pour l'animation fluide
-        smooth_x, smooth_y = interpolate.splev(u_new, tck)
-        return list(zip(smooth_x, smooth_y))
-    except:
-        return list(zip(x, y))
+## 3. Demo (GIFs)
 
-def main():
-    pygame.init()
-    screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
-    pygame.display.set_caption("Simulateur RRT* - Path Planning")
-    clock = pygame.time.Clock()
-    font = pygame.font.SysFont("Arial", 24)
+### 3.1 Creating a new incident
 
-    # 1. Chargement
-    print("Chargement du circuit...")
-    obstacles, bounds, goal_pos = load_track(FILENAME)
-    start_pos = (0.0, 0.0)
+This short demo shows how to:
 
-    # Calcul de l'échelle d'affichage
-    world_w = bounds[1] - bounds[0]
-    world_h = bounds[3] - bounds[2]
-    scale = min((WINDOW_WIDTH - 100) / world_w, (WINDOW_HEIGHT - 100) / world_h)
-    offset = (50, 50)
+- Open the incidents page
+- Use the search
+- Create a new incident with AI suggestion and similar incidents
+- See the newly created incident in the list
 
-    # 2. Planification
-    print("Calcul de la trajectoire RRT* en cours... (Cela peut prendre quelques secondes)")
-    
-    # Petit affichage d'attente
-    screen.fill(BG_COLOR)
-    text = font.render("Calcul du RRT* en cours... Veuillez patienter", True, (255, 255, 255))
-    screen.blit(text, (WINDOW_WIDTH//2 - 200, WINDOW_HEIGHT//2))
-    pygame.display.flip()
+![Demo – Create incident](docs/demo-create-incident.gif)
 
-    rrt = RRTStar(start=start_pos, goal=goal_pos, obstacle_list=obstacles,
-                  rand_area=[bounds[0], bounds[1]], expand_dis=EXPAND_DIS, 
-                  max_iter=MAX_ITER, path_resolution=PATH_RESOLUTION)
-    
-    path = rrt.plan()
+---
 
-    if path is None:
-        print("Echec: Pas de chemin trouvé !")
-        sys.exit()
-    
-    print("Chemin trouvé ! Lissage...")
-    final_path = smooth_path(path)
+### 3.2 AI assistant on a single incident
 
-    # Simulation Loop
-    car_idx = 0
-    running = True
-    
-    while running:
-        screen.fill(BG_COLOR)
-        
-        # Gestion events
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                running = False
+This demo shows the per-incident AI features:
 
-        # Dessiner Obstacles (Plots)
-        for (ox, oy, size) in obstacles:
-            sx, sy = to_screen(ox, oy, bounds, scale, offset)
-            # Taille du plot à l'écran
-            r_screen = max(2, int(size * scale * 0.3)) 
-            pygame.draw.circle(screen, CONE_COLOR, (sx, sy), r_screen)
+- Viewing the AI-generated summary for an incident
+- Asking the “AI assistant for this incident” for root causes and next steps
+- Asking about similar past incidents and mitigations
 
-        # Dessiner le chemin brut (optionnel, en gris foncé)
-        if len(path) > 1:
-            pts = [to_screen(p[0], p[1], bounds, scale, offset) for p in path]
-            pygame.draw.lines(screen, (60, 60, 60), False, pts, 1)
+![Demo – Incident AI assistant](docs/demo-incident-assistant.gif)
 
-        # Dessiner le chemin lissé (Bleu)
-        if len(final_path) > 1:
-            pts_smooth = [to_screen(p[0], p[1], bounds, scale, offset) for p in final_path]
-            pygame.draw.lines(screen, SMOOTH_PATH_COLOR, False, pts_smooth, 3)
+---
 
-        # Dessiner Start & Goal
-        s_pt = to_screen(start_pos[0], start_pos[1], bounds, scale, offset)
-        g_pt = to_screen(goal_pos[0], goal_pos[1], bounds, scale, offset)
-        pygame.draw.circle(screen, (0, 255, 0), s_pt, 5) # Start
-        pygame.draw.circle(screen, (255, 0, 0), g_pt, 5) # Goal
+### 3.3 Global assistant
 
-        # Animation Voiture
-        if car_idx < len(final_path):
-            cx, cy = final_path[car_idx]
-            
-            # Calcul orientation pour faire tourner le rectangle
-            angle = 0
-            if car_idx < len(final_path) - 1:
-                nx, ny = final_path[car_idx + 1]
-                angle = math.degrees(math.atan2(cy - ny, nx - cx)) # Inversion Y pour angle
-            
-            # Position écran
-            sx, sy = to_screen(cx, cy, bounds, scale, offset)
-            
-            # Dessin voiture (simple rectangle)
-            # On crée une surface pour pouvoir la tourner
-            car_w, car_h = 20, 10
-            car_surf = pygame.Surface((car_w, car_h), pygame.SRCALPHA)
-            car_surf.fill(CAR_COLOR)
-            # Rotation (Pygame tourne dans le sens anti-horaire)
-            rotated_car = pygame.transform.rotate(car_surf, angle)
-            rect = rotated_car.get_rect(center=(sx, sy))
-            screen.blit(rotated_car, rect.topleft)
-            
-            car_idx += 1
-        else:
-            # Restart animation
-            car_idx = 0
-            pygame.time.wait(1000)
+This demo shows the global AI assistant:
 
-        pygame.display.flip()
-        clock.tick(FPS)
+- Asking a question about existing incidents (for example: “Which SEV1 incidents exist in the system?”)
+- Getting a synthesized answer based on the incident history
 
-    pygame.quit()
+![Demo – Global assistant](docs/demo-global-assistant.gif)
 
-if __name__ == "__main__":
-    main()
+---
+
+## 4. API (apps/api)
+
+Main endpoints (simplified):
+
+```text
+GET    /incidents                     # list, with filters & pagination
+POST   /incidents                     # create incident
+PATCH  /incidents/:id                 # update status (controlled transitions)
+GET    /incidents/:id                 # get one incident
+POST   /incidents/:id/embedding       # recompute vector embedding
+GET    /incidents/similar             # vector similarity search
+GET    /incidents/:id/summary         # AI summary
+POST   /incidents/:id/chat            # incident-scoped AI chat
+POST   /incidents/embeddings/rebuild  # rebuild all embeddings
+
+POST   /assistant/query               # global assistant (via AI service)
+GET    /health                        # basic healthcheck
+```
+
+Status transitions are restricted:
+
+```text
+OPEN -> ACKNOWLEDGED -> MITIGATING -> RESOLVED -> CLOSED
+```
+
+Status patching can be disabled via environment variable:
+
+```text
+ALLOW_STATUS_PATCH=false
+```
+
+Security: a simple `x-api-key` header is required for API calls.
+
+---
+
+## 5. Front-end (apps/web)
+
+### 5.1 `/incidents`
+
+- Paginated table of incidents
+- Search bar + filters (status / severity)
+- Sort by title, severity, status, created date
+- Badges with colors for severity and status
+- Button “+ New incident”
+- Button “Global assistant” in the header
+- Small empty state when there are no incidents
+
+### 5.2 `/incidents/new`
+
+- Form to create a new incident
+- Buttons:
+  - **Suggest** – calls `/api/incidents/suggest`
+  - **Find similar** – calls `/api/incidents/similar`
+  - **Create** – calls `/api/incidents`
+- Shows:
+  - Suggested title (with “Use suggested title” button)
+  - Impact summary, action items
+  - Tags + proposed severity/status + confidence
+  - List of similar incidents (title, truncated description, score)
+
+### 5.3 `/incidents/[id]`
+
+- “Summary” card:
+  - AI summary
+  - Proposed severity/status, tags, confidence
+  - Raw JSON block with the summary payload
+- “AI assistant for this incident”:
+  - mini chat UI
+  - uses `/api/incidents/[id]/chat`
+
+### 5.4 `/assistant`
+
+- Global assistant page:
+  - simple explanation / examples
+  - textarea for the question
+  - “Ask” button
+  - card showing either:
+    - AI answer
+    - or an error (“assistant unavailable…”)
+- If the AI service cannot reach the LLM (e.g., missing API key), the microservice returns a **fallback summary** and a clear message instead of failing.
+
+---
+
+## 6. AI service (apps/ai)
+
+FastAPI app exposing:
+
+```text
+GET  /health
+POST /incident-chat
+POST /incident-suggest
+POST /assistant-query
+POST /assistant/query    # alias
+```
+
+- Uses `OPENAI_API_KEY` and `OPENAI_MODEL` (default: `gpt-4o-mini`)
+- If `AI_PROVIDER=openai`, uses the official OpenAI client
+- Otherwise, falls back to simple, deterministic logic (no external calls)
+
+The service:
+
+- **incident-chat**:
+  - builds a prompt with incident details + similar incidents
+  - returns a single text reply
+- **incident-suggest**:
+  - heuristic suggestion + optional refinement by OpenAI
+- **assistant-query**:
+  - global assistant that can use a list of incidents as context
+
+If the upstream LLM is unavailable (no key / invalid key / provider error), the service responds with a graceful fallback message so the UI can still render something useful instead of crashing.
+
+---
+
+## 7. Running with Docker (local)
+
+### 7.1 Prerequisites
+
+- Docker + Docker Compose
+- pnpm (only if you want to run parts locally, not strictly required for Docker)
+
+### 7.2 Environment
+
+Check the example env files:
+
+- Root: `.env.example`
+- Infra: `infra/docker/api.env.example`, `web.env.example`, `ai.env.example`
+- API: `apps/api/.env.example`
+
+Create real `.env` files **locally** (do not commit them):
+
+```bash
+cp .env.example .env
+cp infra/docker/api.env.example infra/docker/api.env
+cp infra/docker/web.env.example infra/docker/web.env
+cp infra/docker/ai.env.example infra/docker/ai.env
+# fill in OPENAI_API_KEY etc.
+```
+
+### 7.3 Start the stack (local)
+
+From the `infra/docker` folder:
+
+```bash
+docker compose up --build
+```
+
+Default ports (local machine):
+
+- API: `http://localhost:3001`
+- Web: `http://localhost:3000`
+- AI service: `http://localhost:8000`
+- Postgres (pgvector): `localhost:5432`
+
+You can then open the web UI on `http://localhost:3000`.
+
+---
+
+## 8. Development (local, without Docker)
+
+Example (API only):
+
+```bash
+cd apps/api
+pnpm install
+pnpm run prisma:generate
+pnpm run start:dev
+```
+
+Example (web only):
+
+```bash
+cd apps/web
+pnpm install
+pnpm dev
+```
+
+> In practice, the recommended way to run the full app is still via Docker Compose.
+
+---
+
+## 9. Example deployment on AWS EC2 (demo)
+
+This project can be deployed as a small “all-in-one” stack on a single EC2 instance using Docker Compose.
+
+### 9.1 High-level approach
+
+- 1× EC2 instance (Ubuntu)
+- Install Docker + Docker Compose
+- Clone the repository
+- Create production `.env` files in `infra/docker/`
+- Run `docker-compose up -d`
+- Expose the web app on port 80 (mapped to the Next.js container port)
+
+### 9.2 Minimal steps (manual, non-automated)
+
+On the EC2 instance (Ubuntu):
+
+```bash
+# Update and install Docker + docker-compose
+sudo apt update
+sudo apt install -y docker.io docker-compose git
+
+# (optional) add your user to docker group
+sudo usermod -aG docker $USER
+# then log out / log back in
+```
+
+Clone the project:
+
+```bash
+cd ~
+git clone https://github.com/<your-username>/incident-copilot.git
+cd incident-copilot/infra/docker
+```
+
+Create production env files (never commit these):
+
+```bash
+cp api.env.example api.env
+cp web.env.example web.env
+cp ai.env.example ai.env
+```
+
+Then edit:
+
+- `api.env` (inside `infra/docker/`), for example:
+
+```env
+NODE_ENV=production
+PORT=3001
+DATABASE_URL=postgresql://copilot:copilot@postgres:5432/copilot
+CORS_ORIGIN=http://YOUR_EC2_PUBLIC_IP
+API_KEY=dev-secret-123
+EMB_FALLBACK=local
+ALLOW_STATUS_PATCH=false
+AI_BASE=http://ai:8000
+```
+
+- `web.env`:
+
+```env
+NODE_ENV=production
+PORT=3000
+NEXT_PUBLIC_API_BASE=http://YOUR_EC2_PUBLIC_IP:3001
+API_BASE_INTERNAL=http://api:3001
+API_KEY=dev-secret-123
+ENABLE_STATUS_UPDATE=false
+```
+
+- `ai.env`:
+
+```env
+API_BASE=http://api:3001
+API_KEY=dev-secret-123
+AI_PROVIDER=openai
+OPENAI_MODEL=gpt-4o-mini
+OPENAI_API_KEY=sk-...your_key_here...
+```
+
+In `docker-compose.yml`, you can optionally map the web container to port 80:
+
+```yaml
+  web:
+    # ...
+    ports:
+      - "80:3000"
+```
+
+Then start the stack:
+
+```bash
+cd infra/docker
+docker-compose up -d --build
+```
+
+You should now be able to open:
+
+- `http://YOUR_EC2_PUBLIC_IP/` → Next.js front-end
+- `http://YOUR_EC2_PUBLIC_IP/incidents` → incidents UI
+- The front-end talks to the API and AI service through the Docker network.
+
+When you update the code and push to GitHub, you can redeploy by:
+
+```bash
+cd ~/incident-copilot
+git pull
+cd infra/docker
+docker-compose down
+docker-compose up -d --build
+```
+
+> This is intentionally a **simple, single-instance deployment** meant for demo / portfolio purposes, not a production-grade setup (no HTTPS, no autoscaling, no managed database, etc.).
+
+---
+
+## 10. Notes / Limitations
+
+- This is a **student / demo project**, not production-ready.
+- Security is minimal:
+  - simple `x-api-key` on the API
+  - no auth / RBAC / multi-tenant separation
+- Embeddings are simple bag-of-words vectors, not true transformer embeddings.
+- Error handling is basic but tries to always return a clear message to the UI.
+- The AI microservice is designed to **fail gracefully**:
+  - if the LLM cannot be reached, it still returns a text explanation and/or a basic summary instead of crashing, so the UI remains usable.
+
+---
+
+## 11. License
+
+No explicit license yet.  
+For now, treat this as “look at the code, don’t use in production without permission”.
